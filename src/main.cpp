@@ -100,7 +100,7 @@ T requestInput(std::string const &what)
 
     while(true)
     {
-        if(std::is_same<T, bool>)
+        if(std::is_same<T, bool>())
         {
             std::cout << what << " [Y/n]: ";
             ++printedLines;
@@ -152,7 +152,7 @@ T requestInput(std::string const &what)
                 T var;
                 ss >> var;
 
-                if(!ss.fail() && (!std::is_arithmetic<T> || (NoZero ? var > 0 : var >= 0)))
+                if(!ss.fail() && (!std::is_arithmetic<T>() || (NoZero ? var > 0 : var >= 0)))
                 {
                     std::cout << "\x1b[" << printedLines << "A\x1b[J"; // Move up printedLines lines and clear down
                     printedLines = 0;

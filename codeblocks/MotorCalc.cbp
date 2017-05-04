@@ -6,7 +6,7 @@
 		<Option pch_mode="2" />
 		<Option compiler="clang" />
 		<Build>
-            <Target title="Release-Unix">
+			<Target title="Release-Unix">
 				<Option platforms="Windows;Unix;" />
 				<Option output="build/bin/Release-Unix/motorcalc" prefix_auto="1" extension_auto="1" />
 				<Option working_dir="build/bin/Release-Unix/" />
@@ -19,10 +19,10 @@
 				</Compiler>
 				<Linker>
 					<Add option="-s" />
-                    <Add option="-flto" />
+					<Add option="-flto" />
 				</Linker>
 			</Target>
-            <Target title="Debug-Unix">
+			<Target title="Debug-Unix">
 				<Option platforms="Windows;Unix;" />
 				<Option output="build/bin/Debug-Unix/motorcalc" prefix_auto="1" extension_auto="1" />
 				<Option working_dir="build/bin/Debug-Unix/" />
@@ -47,7 +47,7 @@
 				</Compiler>
 				<Linker>
 					<Add option="-s" />
-                    <Add option="-flto" />
+					<Add option="-flto" />
 					<Add library="mingw32" />
 					<Add library="mingwex" />
 					<Add library="msvcrt" />
@@ -79,9 +79,6 @@
 			<Add option="-fno-exceptions" />
 			<Add option="-fno-rtti" />
 		</Compiler>
-		<Linker>
-			<Add option="-nodefaultlibs" />
-		</Linker>
 		<Unit filename="../src/main.cpp" />
 		<Extensions>
 			<code_completion />
