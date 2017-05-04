@@ -1,0 +1,54 @@
+Brief Description
+=================
+Example Program is a program that serves as an example for other programs.
+____________________
+
+
+
+Features
+========
+- Being an example
+- Doesn't actually exist
+____________________
+
+
+
+Research to Do
+==============
+- How do I define a standard spec accurately?
+- Look at other examples of examples
+____________________
+
+
+
+Implementation Hierarchy
+========================
+Component A: Making the sandwich
+- Dependencies: Bread x2, Meat, Lettuce
+- Put the parts together
+  - Place a bread slice down
+  - Place the meat down
+  - Place the lettuce down
+  - Place the other bread slice down
+- Send the sandwich to Component B
+
+Component B: Eating the sandwich
+[...]
+____________________
+
+
+
+Possible Libraries to Use
+=========================
+- Example Lib (https://example.com/)
+- SandwichCPP (http://sandwich.org/)
+- FFmpeg      (https://ffmpeg.org/)
+____________________
+
+
+
+General Notes
+=============
+- FFmpeg is used to decode the sandwich file
+- I need to integrate payment
+  - Paypal?  Legal considerations?
