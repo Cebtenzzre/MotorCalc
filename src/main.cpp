@@ -1,9 +1,6 @@
-#define _USE_MATH_DEFINES
-    #include <cmath>
-#undef _USE_MATH_DEFINES
-
 #include <cctype>
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -18,6 +15,7 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include <utility/io.hpp>
 #include <utility/macros.hpp>
 #include <utility/oneof.hpp>
 
@@ -82,6 +80,9 @@
     In the end, mech watts per $, in both efficient and max power modes (checking all between brute-force?), with or without a DC converter, at different levels of max battery life.
 */
 
+// TODO: Support different input variables; e.g. no-load RPM instead of Kv, or specs without no load RPM but with max output power, or
+//       specs with torque at stall and max efficiency but no resistance
+
 #define CHECK_AND_PAUSE                            \
 do {                                               \
     int result;                                    \
@@ -91,75 +92,80 @@ do {                                               \
         goto restart;                              \
 } while(false)
 
+static void clearCin()
+{
+    std::cin.clear();
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+}
+
 template <typename T, bool NoZero = false>
 T requestInput(std::string const &what)
 {
     std::size_t printedLines = 0;
 
-    std::cout << std::defaultfloat << std::setprecision(std::numeric_limits<double>::digits10 + 2);
+    if(!std::is_same<T, bool>())
+        std::cout << std::defaultfloat << std::setprecision(std::numeric_limits<long double>::digits10);
+
+    auto displayResult = [&printedLines, &what] (auto const value)
+    {
+        std::cout << "\x1b[" << printedLines << "A\x1b[J"; // Move up printedLines lines and clear down
+        printedLines = 0;
+
+        auto const pos = (what.front() == '\x1b') ? what.find('m') + 1 : 0;
+        std::string const newWhat = what.substr(0, pos) + scast<char>(toupper(what[pos])) + what.substr(pos + 1);
+
+        std::cout << newWhat << ": ";
+
+        if(std::is_same<decltype(value), bool>())
+            std::cout << (value ? "✓" : "X");
+        else
+            std::cout << value;
+
+        std::cout << '\n';
+        return value;
+    };
 
     while(true)
     {
+        ++printedLines; // We're going to print a new line of text
         if(std::is_same<T, bool>())
         {
             std::cout << what << " [Y/n]: ";
-            ++printedLines;
 
             std::string yesNo;
             std::getline(std::cin, yesNo);
 
             if(std::cin.fail())
-            {
-                std::cin.clear();
-                std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-            } else {
+                clearCin();
+            else {
                 std::transform(yesNo.begin(), yesNo.end(), yesNo.begin(), tolower);
-                if(yesNo == utility::oneOf("yes", "y", ""))
-                {
-                    std::cout << "\x1b[" << printedLines << "A\x1b[J"; // Move up printedLines lines and clear down
-                    printedLines = 0;
-
-                    std::cout << scast<char>(std::toupper(what.front())) << what.substr(1) << ": ✓\n";
-                    return true;
-                }
-                if(yesNo == utility::oneOf("no", "n"))
-                {
-                    std::cout << "\x1b[" << printedLines << "A\x1b[J"; // Move up printedLines lines and clear down
-                    printedLines = 0;
-
-                    std::cout << scast<char>(std::toupper(what.front())) << what.substr(1) << ": X\n";
-                    return false;
-                }
+                if(yesNo == utility::oneOf("yes", "y", "", "no", "n"))
+                    return displayResult(yesNo[0] == utility::oneOf('y', '\0')); // true if yes
             }
         } else {
             std::cout << "Enter " << what << ": \x1b[s"; // Save cursor
-            ++printedLines;
 
-            inPlaceRetry:
-            std::string str;
-            std::getline(std::cin, str);
-
-            if(std::cin.fail())
+            while(true)
             {
-                std::cin.clear();
-                std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-            } else if(str.empty()) // Handle enter with no text
-            {
-                std::cout << "\x1b[u"; // Restore cursor
-                goto inPlaceRetry;
-            } else {
-                std::stringstream ss(str, std::ios::in);
-                T var;
-                ss >> var;
+                std::string str;
+                std::getline(std::cin, str);
 
-                if(!ss.fail() && (!std::is_arithmetic<T>() || (NoZero ? var > 0 : var >= 0)))
+                if(std::cin.fail())
+                    clearCin();
+                else if(str.empty()) // Handle enter with no text
                 {
-                    std::cout << "\x1b[" << printedLines << "A\x1b[J"; // Move up printedLines lines and clear down
-                    printedLines = 0;
+                    std::cout << "\x1b[A\x1b[u"; // Restore cursor
+                    continue;
+                } else {
+                    std::stringstream ss(str, std::ios::in);
+                    T var;
+                    ss >> var;
 
-                    std::cout << scast<char>(toupper(what.front())) << what.substr(1) << ": " << var << "\n";
-                    return var;
+                    if(!ss.fail() && (!std::is_arithmetic<T>() || (NoZero ? var > 0 : var >= 0)))
+                        return displayResult(var);
                 }
+
+                break;
             }
         }
 
@@ -182,11 +188,11 @@ bool confirmAndRequestInput(T &var, std::string const name)
 
 struct Inputs
 {
-    double const kv            = requestInput<double, true>("Kv");
-    double const voltage       = requestInput<double, true>("voltage");
-    double const noLoadCurrent = requestInput<double>      ("unloaded current (A)");
-    double       maxCurrent    = requestInput<double, true>("maximum current (A)");
-    double const armatureR     = requestInput<double>      ("armature resistance (mΩ)");
+    long double const kv            = requestInput<long double, true>("\x1b[1m" "Kv"                       "\x1b[0m");
+    long double const voltage       = requestInput<long double, true>("\x1b[1m" "voltage"                  "\x1b[0m");
+    long double const noLoadCurrent = requestInput<long double>      ("\x1b[1m" "unloaded current (A)"     "\x1b[0m");
+    long double       maxCurrent    = requestInput<long double, true>("\x1b[1m" "maximum current (A)"      "\x1b[0m");
+    long double const armatureR     = requestInput<long double>      ("\x1b[1m" "armature resistance (mΩ)" "\x1b[0m");
 };
 
 enum class ValToFind: uint8_t
@@ -195,27 +201,32 @@ enum class ValToFind: uint8_t
     Efficiency
 };
 
-[[gnu::pure]] double findMax(Inputs const &inputs, ValToFind const val)
-{
-    double const kt = 1352 / inputs.kv;
+#define GLUE_(x, y) x##y
+#define GLUE(x, y) GLUE_(x, y)
+#define LD_PI GLUE(M_PI, L)
 
-    double const hardMinCurrent = inputs.noLoadCurrent + 0.0001; // To avoid zero/very low torque
-    double minCurrent = hardMinCurrent;
-    double maxCurrent = inputs.maxCurrent;
-    double step = (inputs.maxCurrent - hardMinCurrent) / 10;
-    double best = 0, bestCurrent = hardMinCurrent; // Highest value and the current at which it is reached
+// TODO: Remove code duplication.
+[[gnu::pure]] static long double findMax(Inputs const &inputs, ValToFind const val)
+{
+    auto const kt = 1352.L / inputs.kv;
+
+    long double const hardMinCurrent = inputs.noLoadCurrent + .0001L; // To avoid zero/very low torque
+    long double minCurrent = hardMinCurrent;
+    long double maxCurrent = inputs.maxCurrent;
+    long double step = (inputs.maxCurrent - hardMinCurrent) / 10L;
+    long double best = 0.L, bestCurrent = hardMinCurrent; // Highest value and the current at which it is reached
 
     do {
         bool update = false;
 
-        for(double current = minCurrent; current <= maxCurrent;
+        for(long double current = minCurrent; current <= maxCurrent;
             ((current += step) > maxCurrent && (current - step) < maxCurrent /* Don't run forever with current at max */) ?
             current = maxCurrent : 0)
         {
-            double const rpm = (current * inputs.armatureR / 1000 - inputs.voltage) * inputs.kv * -1;
-            double const q   = kt * (current - inputs.noLoadCurrent) * 0.00706; // Q in in ozf-in converted to Nm
+            long double const rpm = (inputs.voltage - current * inputs.armatureR / 1000.L) * inputs.kv;
+            long double const q   = kt * (current - inputs.noLoadCurrent) * .00706L; // Q in in ozf-in converted to Nm
 
-            double const powerOut   = q * rpm * (2 * M_PI) / 60;
+            long double const powerOut   = q * rpm * LD_PI / 30.L; // 2 * pi / 60 = pi / 30
 
             if(val == ValToFind::Power)
             {
@@ -226,8 +237,8 @@ enum class ValToFind: uint8_t
                     bestCurrent = current;
                 }
             } else {
-                double const powerIn    = inputs.voltage * current;
-                double const efficiency = (powerOut / powerIn) * 100;
+                long double const powerIn    = inputs.voltage * current;
+                long double const efficiency = (powerOut / powerIn) * 100.L;
 
                 if(efficiency > best)
                 {
@@ -246,17 +257,18 @@ enum class ValToFind: uint8_t
         maxCurrent = std::min(bestCurrent + step, inputs.maxCurrent);
 
         step /= 10;
-    } while(utility::oneOf(maxCurrent - bestCurrent, bestCurrent - minCurrent) >= 0.0001); // Accurate to 4 decimal places, or +/- 0.0001
+    } while(utility::oneOf(maxCurrent - bestCurrent, bestCurrent - minCurrent) >= .0001L); // Accurate to 4 decimal places, or +/- .0001
 
     return bestCurrent;
 }
 
+// TODO: Real error message upon failure of pause()
 int pause()
 {
     std::cout << "Press [Esc] to quit or [Enter] to restart... \n";
 
     struct termios oldt;
-    tcgetattr(STDIN_FILENO, &oldt);
+    tcgetattr(STDIN_FILENO, &oldt); // XXX: @Robustness Warn on failure.
 
     errno = 0;
 
@@ -273,32 +285,32 @@ int pause()
     char ch = '\0';
 
     do {
-        result = read(STDIN_FILENO, &ch, 1);
+        result = utility::smartRead(STDIN_FILENO, &ch, 1);
         if(ch == utility::oneOf('\x1b', '\n'))
         {
-            tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-            return ch == '\x1b';
+            tcsetattr(STDIN_FILENO, TCSANOW, &oldt); // XXX: @Robustness Warn on failure.
+            return ch == '\n';
         }
     } while(result >= 0);
 
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt); // XXX: @Robustness Warn on failure.
 
     return result;
 }
 
-int main(int const argc, char ** const argv)
+int main([[maybe_unused]] int const argc, char ** const argv)
 {
-    if(utility::oneOf(isatty(STDIN_FILENO),  isatty(STDOUT_FILENO)) == 0)
+    if(utility::oneOf(isatty(STDIN_FILENO), isatty(STDOUT_FILENO)) == 0)
     {
         // We are not connected to a terminal, and probably were started directly.  Open a terminal.
 
         // XXX: This opens konsole on Arch.  Try exo-open first, and put konsole last unless we're on KDE.
         char const * const termOption1[] = {"x-terminal-emulator", "--title=MotorCalc",        "-x", argv[0], "p", nullptr};
         char const * const termOption2[] = {"gnome-terminal",      "-t", "MotorCalc",          "-x", argv[0], "p", nullptr};
-        char const * const termOption3[] = {"konsole",             "-p", "tabtitle=MotorCalc", "-e", argv[0], "p", nullptr};
+        //char const * const termOption3[] = {"konsole",             "-p", "tabtitle=MotorCalc", "-e", argv[0], "p", nullptr}; // XXX: @Temporary
         char const * const termOption4[] = {"xfce4-terminal",      "-T=MotorCalc",             "-x", argv[0], "p", nullptr};
         char const * const termOption5[] = {"xterm",               "-T", "MotorCalc",          "-e", argv[0], "p", nullptr};
-        char const * const * const termOptions[] = {termOption1, termOption2, termOption3, termOption4, termOption5};
+        char const * const * const termOptions[] = {termOption1, termOption2, /*termOption3,*/ termOption4, termOption5};
 
         for(auto const termOption: termOptions)
         {
@@ -320,64 +332,60 @@ int main(int const argc, char ** const argv)
 
         std::cout << std::setprecision(2) << std::fixed;
 
-        if(inputs.maxCurrent - inputs.noLoadCurrent < 0.01)
+        if(inputs.maxCurrent - inputs.noLoadCurrent < .01L)
         {
-            std::cout << "\n\n\x1b[31mError: Maximum current is less than, equal to, or very close to unloaded current.\x1b[0m\n\n\n";
+            std::cout << "\n\n\x1b[31mError: Maximum current is less than or very close to unloaded current.\x1b[0m\n\n\n";
             CHECK_AND_PAUSE;
             return EXIT_SUCCESS;
         }
 
-        if((inputs.noLoadCurrent + 0.0001) * inputs.armatureR / 1000 > inputs.voltage)
+        if((inputs.noLoadCurrent + .0001L) * inputs.armatureR / 1000.L > inputs.voltage)
         {
-            std::cout << "\n\n\x1b[31mError: At minimum current or barely above, the motor would be an open circuit (Vdrop > Vin).\x1b[0m\n\n\n";
+            std::cout << "\n\n\x1b[31mError: At no load current or barely above, the motor would be an open circuit (Vdrop > Vin).\x1b[0m\n\n\n";
             CHECK_AND_PAUSE;
             return EXIT_SUCCESS;
         }
 
-        if(inputs.maxCurrent * inputs.armatureR / 1000 >= inputs.voltage)
+        if(inputs.maxCurrent * inputs.armatureR / 1000.L >= inputs.voltage)
         {
-            inputs.maxCurrent = inputs.voltage / (inputs.armatureR / 1000) + 0.0001;
+            inputs.maxCurrent = inputs.voltage / (inputs.armatureR / 1000.L) + .0001L;
             std::cout << "\n\n\x1b[1;33mWarning: At maximum current, the motor would be an open circuit (Vdrop > Vin).\n"
                          "Maximum current has been reduced to \x1b[36m" << inputs.maxCurrent << " A\x1b[33m.\x1b[0m\n";
         }
 
-        auto const pOutCurrent = findMax(inputs, ValToFind::Power);
-        auto const effCurrent  = findMax(inputs, ValToFind::Efficiency);
+        struct Values
+        {
+            long double current, rpm, q, powerIn, powerOut, efficiency;
 
-        double const kt = 1352 / inputs.kv;
+            Values(Inputs const &inputs, long double const currentIn): current(currentIn)
+            {
+                auto const kt = 1352.L / inputs.kv;
 
-        double const pOutRpm = (pOutCurrent * inputs.armatureR / 1000 - inputs.voltage) * inputs.kv * -1;
-        double const pOutQ   = kt * (pOutCurrent - inputs.noLoadCurrent) * 0.00706; // Q in in ozf-in converted to Nm
+                rpm = (inputs.voltage - current * inputs.armatureR / 1000.L) * inputs.kv;
+                q   = kt * (current - inputs.noLoadCurrent) * .00706L; // Q in in ozf-in converted to Nm
 
-        double const pOutPowerOut   = pOutQ * pOutRpm * (2 * M_PI) / 60;
-        double const pOutPowerIn    = inputs.voltage * pOutCurrent;
-        double const pOutEfficiency = (pOutPowerOut / pOutPowerIn) * 100;
+                powerOut   = q * rpm * LD_PI / 30.L; // 2 * pi / 60 = pi / 30
+                powerIn    = inputs.voltage * current;
+                efficiency = (powerOut / powerIn) * 100.L;
+            }
 
+            void print()
+            {
+                // XXX: @LaunguageIssue Manual columnification.  Existing iostream utilities (setw + math) might be a way to implement auto-columns.
+                std::cout << "Current:    \x1b[1;36m" << current    << " A"   "\x1b[0m\n"
+                             "Speed:      \x1b[1;36m" << rpm        << " RPM" "\x1b[0m\n"
+                             "Torque:     \x1b[1;36m" << q * 100    << " Ncm" "\x1b[0m\n"
+                             "Power in:   \x1b[1;36m" << powerIn    << " W"   "\x1b[0m\n"
+                             "Power out:  \x1b[1;36m" << powerOut   << " W\x1b[0m, \x1b[1;36m" << powerOut / 745.69987158227022L << " HP\x1b[0m\n"
+                             "Efficiency: \x1b[1;36m" << efficiency << "%"    "\x1b[0m\n";
+            }
+        } maxPower(inputs, findMax(inputs, ValToFind::Power)), maxEfficiency(inputs, findMax(inputs, ValToFind::Efficiency));
 
-        double const effRpm = (effCurrent * inputs.armatureR / 1000 - inputs.voltage) * inputs.kv * -1;
-        double const effQ   = kt * (effCurrent - inputs.noLoadCurrent) * 0.00706; // Q in in ozf-in converted to Nm
-
-        double const effPowerOut   = effQ * effRpm * (2 * M_PI) / 60;
-        double const effPowerIn    = inputs.voltage * effCurrent;
-        double const effEfficiency = (effPowerOut / effPowerIn) * 100;
-
-        std::cout << "\n\n"
-                     "At maximum output power:\n"
-                     "\x1b[1;36m" << pOutCurrent    << " A\x1b[0m current\n"
-                     "\x1b[1;36m" << pOutRpm        << " RPM\x1b[0m\n"
-                     "\x1b[1;36m" << pOutQ * 100    << " Ncm\x1b[0m torque\n"
-                     "\x1b[1;36m" << pOutPowerIn    << " W\x1b[0m in\n"
-                     "\x1b[1;36m" << pOutPowerOut   << " W\x1b[0m out\n"
-                     "\x1b[1;36m" << pOutEfficiency << "%\x1b[0m efficiency\n"
-                     "\n\n"
-                     "At maximum efficiency:\n"
-                     "\x1b[1;36m" << effCurrent    << " A\x1b[0m current\n"
-                     "\x1b[1;36m" << effRpm        << " RPM\x1b[0m\n"
-                     "\x1b[1;36m" << effQ * 100    << " Ncm\x1b[0m torque\n"
-                     "\x1b[1;36m" << effPowerIn    << " W\x1b[0m in\n"
-                     "\x1b[1;36m" << effPowerOut   << " W\x1b[0m out\n"
-                     "\x1b[1;36m" << effEfficiency << "%\x1b[0m efficiency\n"
-                     "\n\n";
+        std::cout << "\n\n\x1b[1mAt maximum output power:\x1b[0m\n";
+        maxPower.print();
+        std::cout << "\n\n\x1b[1mAt maximum efficiency:\x1b[0m\n";
+        maxEfficiency.print();
+        std::cout << "\n\n";
     }
 
     CHECK_AND_PAUSE;
