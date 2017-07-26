@@ -82,6 +82,11 @@
 
 // TODO: Support different input variables; e.g. no-load RPM instead of Kv, or specs without no load RPM but with max output power, or
 //       specs with torque at stall and max efficiency but no resistance
+// TODO: Lipo cell count to voltage -- some sites specify that
+// TODO: If the user doesn't know something like no-load current or resistance, then warn in yellow about inaccuracies, and don't calculate anything
+//       depending on efficiency.
+// TODO: Handling unloaded current at a different voltage?  I see that everywhere.  Possible?  V=I/R?
+// TODO: Y/N shouldn't need 'enter' to be pressed afterwards.
 
 #define CHECK_AND_PAUSE                            \
 do {                                               \
@@ -116,7 +121,7 @@ T requestInput(std::string const &what)
 
         std::cout << newWhat << ": ";
 
-        if(std::is_same<decltype(value), bool>())
+        if(std::is_same<std::decay_t<decltype(value)>, bool>())
             std::cout << (value ? "✓" : "X");
         else
             std::cout << value;
@@ -130,17 +135,26 @@ T requestInput(std::string const &what)
         ++printedLines; // We're going to print a new line of text
         if(std::is_same<T, bool>())
         {
-            std::cout << what << " [Y/n]: ";
+            std::cout << what << " [y/n]: \x1b[s";
 
-            std::string yesNo;
-            std::getline(std::cin, yesNo);
+            while(true)
+            {
+                std::string yesNo;
+                std::getline(std::cin, yesNo);
 
-            if(std::cin.fail())
-                clearCin();
-            else {
-                std::transform(yesNo.begin(), yesNo.end(), yesNo.begin(), tolower);
-                if(yesNo == utility::oneOf("yes", "y", "", "no", "n"))
-                    return displayResult(yesNo[0] == utility::oneOf('y', '\0')); // true if yes
+                if(std::cin.fail())
+                    clearCin();
+                else if(yesNo.empty()) // Handle enter with no text
+                {
+                    std::cout << "\x1b[A\x1b[u"; // Restore cursor // TODO: Sometimes fails???
+                    continue;
+                } else {
+                    std::transform(yesNo.begin(), yesNo.end(), yesNo.begin(), tolower);
+                    if(yesNo == zutil::oneOf("yes", "y", "no", "n"))
+                        return displayResult(yesNo[0] == 'y'); // true if yes
+                }
+
+                break;
             }
         } else {
             std::cout << "Enter " << what << ": \x1b[s"; // Save cursor
@@ -174,22 +188,29 @@ T requestInput(std::string const &what)
     }
 }
 
-#if 0
-template <typename T>
+template <typename T, bool NoZero = false>
 bool confirmAndRequestInput(T &var, std::string const name)
 {
-    auto const known = requestInput<bool>(std::string("Do you know ") + name + "?");
-    if(known)
-        var = requestInput<std::remove_reference_t<T>>(name);
-
-    return known;
+    return requestInput<bool>(std::string("Do you know ") + name + "?") ? (var = requestInput<std::decay_t<T>, NoZero>(name), true)
+                                                                        : false;
 }
-#endif
 
 struct Inputs
 {
     long double const kv            = requestInput<long double, true>("\x1b[1m" "Kv"                       "\x1b[0m");
-    long double const voltage       = requestInput<long double, true>("\x1b[1m" "voltage"                  "\x1b[0m");
+    long double const voltage       = []()
+    {
+        long double input;
+        if(confirmAndRequestInput<long double, true>(input, "\x1b[1m" "voltage (V)" "\x1b[0m"))
+            return input;
+        if(confirmAndRequestInput<long double, true>(input, "\x1b[1m" "equiv. # of LiPo cells" "\x1b[0m"))
+            return input * 3.7L; // 3.7 volt nominal LiPo voltage
+        // TODO: Set custom parenthesized "(x.xx volts)"?
+
+        std::cout << "Uh-oh, you don't have enough info, or this calculator sucks!\n\n\n";
+        pause();
+        std::exit(EXIT_FAILURE); // TODO: Restart choice should actually work here
+    }();
     long double const noLoadCurrent = requestInput<long double>      ("\x1b[1m" "unloaded current (A)"     "\x1b[0m");
     long double       maxCurrent    = requestInput<long double, true>("\x1b[1m" "maximum current (A)"      "\x1b[0m");
     long double const armatureR     = requestInput<long double>      ("\x1b[1m" "armature resistance (mΩ)" "\x1b[0m");
@@ -257,7 +278,7 @@ enum class ValToFind: uint8_t
         maxCurrent = std::min(bestCurrent + step, inputs.maxCurrent);
 
         step /= 10;
-    } while(utility::oneOf(maxCurrent - bestCurrent, bestCurrent - minCurrent) >= .0001L); // Accurate to 4 decimal places, or +/- .0001
+    } while(zutil::oneOf(maxCurrent - bestCurrent, bestCurrent - minCurrent) >= .0001L); // Accurate to 4 decimal places, or +/- .0001
 
     return bestCurrent;
 }
@@ -285,8 +306,8 @@ int pause()
     char ch = '\0';
 
     do {
-        result = utility::smartRead(STDIN_FILENO, &ch, 1);
-        if(ch == utility::oneOf('\x1b', '\n'))
+        result = zutil::smartRead(STDIN_FILENO, &ch, 1);
+        if(ch == zutil::oneOf('\x1b', '\n'))
         {
             tcsetattr(STDIN_FILENO, TCSANOW, &oldt); // XXX: @Robustness Warn on failure.
             return ch == '\n';
@@ -298,31 +319,48 @@ int pause()
     return result;
 }
 
-int main([[maybe_unused]] int const argc, char ** const argv)
+// XXX: @LanguageAlt fn main(string[] argv) or fn main(string[] argv) -> num/int/s32 (return type deduced -- int has a different meaning here)
+int main(int const argc, char ** const argv)
 {
-    if(utility::oneOf(isatty(STDIN_FILENO), isatty(STDOUT_FILENO)) == 0)
+    // XXX: @LanguageIssue isatty() should not fail.  To lazy to SMART_ASSERT() on errno.
+    switch(isatty(STDIN_FILENO) + isatty(STDOUT_FILENO))
     {
-        // We are not connected to a terminal, and probably were started directly.  Open a terminal.
+    case 2: break;
+    case 1:
+        std::cout << "This application is meant to be fully interactive. Starting a terminal...\n";
+        [[fallthrough]];
+    case 0:
+        if(argc >= 2 && ""_sv != argv[1]) != 0)
+        {
+            // TODO: Warn about misuse or error
+        }
+
+        // We are not connected to a terminal, and we were started directly.  Open a terminal.
 
         // XXX: This opens konsole on Arch.  Try exo-open first, and put konsole last unless we're on KDE.
-        char const * const termOption1[] = {"x-terminal-emulator", "--title=MotorCalc",        "-x", argv[0], "p", nullptr};
-        char const * const termOption2[] = {"gnome-terminal",      "-t", "MotorCalc",          "-x", argv[0], "p", nullptr};
-        //char const * const termOption3[] = {"konsole",             "-p", "tabtitle=MotorCalc", "-e", argv[0], "p", nullptr}; // XXX: @Temporary
-        char const * const termOption4[] = {"xfce4-terminal",      "-T=MotorCalc",             "-x", argv[0], "p", nullptr};
-        char const * const termOption5[] = {"xterm",               "-T", "MotorCalc",          "-e", argv[0], "p", nullptr};
+        // XXX: Why "p"?
+        char const * const termOption1[] = {"x-terminal-emulator", "--title=MotorCalc",        "-x", argv[0], "", nullptr};
+        char const * const termOption2[] = {"gnome-terminal",      "-t", "MotorCalc",          "-x", argv[0], "", nullptr};
+        //char const * const termOption3[] = {"konsole",             "-p", "tabtitle=MotorCalc", "-e", argv[0], "", nullptr}; // XXX: @Temporary
+        char const * const termOption4[] = {"xfce4-terminal",      "-T=MotorCalc",             "-x", argv[0], "", nullptr};
+        char const * const termOption5[] = {"xterm",               "-T", "MotorCalc",          "-e", argv[0], "", nullptr};
         char const * const * const termOptions[] = {termOption1, termOption2, /*termOption3,*/ termOption4, termOption5};
 
         for(auto const termOption: termOptions)
         {
             execvp(const_cast<char *>(termOption[0]), const_cast<char * const *>(termOption));
+            // XXX: zutil::exec(termOption); -- how to avoid ambiguity with optional argv[0] for the array-as-args version?
+            SMART_ASSERT(errno != 0);
 
             // TODO: Should we check for a fatal error, retry, or skip here?
             //       Are there other places here, in other programs, this question could apply to?
             if(errno != ENOENT) // An error occurred other then the requested terminal not existsing
-                return errno == 0 ? EXIT_FAILURE : -errno;
+                return -errno;
         }
 
         return EXIT_FAILURE; // Usable terminal could not be found
+    break;
+    default: SMART_ASSERT(false);
     }
 
     restart:
@@ -355,29 +393,29 @@ int main([[maybe_unused]] int const argc, char ** const argv)
 
         struct Values
         {
-            long double current, rpm, q, powerIn, powerOut, efficiency;
+            long double current, rpm, torque, powerIn, powerOut, efficiency;
 
             Values(Inputs const &inputs, long double const currentIn): current(currentIn)
             {
                 auto const kt = 1352.L / inputs.kv;
 
-                rpm = (inputs.voltage - current * inputs.armatureR / 1000.L) * inputs.kv;
-                q   = kt * (current - inputs.noLoadCurrent) * .00706L; // Q in in ozf-in converted to Nm
+                rpm    = (inputs.voltage - (current * inputs.armatureR / 1000.L /* voltage drop from resistance */)) * inputs.kv;
+                torque = kt * (current - inputs.noLoadCurrent) * .00706L; // Torque in in ozf-in converted to Nm
 
-                powerOut   = q * rpm * LD_PI / 30.L; // 2 * pi / 60 = pi / 30
+                powerOut   = torque * rpm * LD_PI / 30.L; // 2 * pi / 60 -> pi / 30
                 powerIn    = inputs.voltage * current;
-                efficiency = (powerOut / powerIn) * 100.L;
+                efficiency = powerOut * 100.L / powerIn;
             }
 
             void print()
             {
                 // XXX: @LaunguageIssue Manual columnification.  Existing iostream utilities (setw + math) might be a way to implement auto-columns.
-                std::cout << "Current:    \x1b[1;36m" << current    << " A"   "\x1b[0m\n"
-                             "Speed:      \x1b[1;36m" << rpm        << " RPM" "\x1b[0m\n"
-                             "Torque:     \x1b[1;36m" << q * 100    << " Ncm" "\x1b[0m\n"
-                             "Power in:   \x1b[1;36m" << powerIn    << " W"   "\x1b[0m\n"
-                             "Power out:  \x1b[1;36m" << powerOut   << " W\x1b[0m, \x1b[1;36m" << powerOut / 745.69987158227022L << " HP\x1b[0m\n"
-                             "Efficiency: \x1b[1;36m" << efficiency << "%"    "\x1b[0m\n";
+                std::cout << "Current:    \x1b[1;36m" << current      << " A"   "\x1b[0m\n"
+                             "Speed:      \x1b[1;36m" << rpm          << " RPM" "\x1b[0m\n"
+                             "Torque:     \x1b[1;36m" << torque * 100 << " Ncm" "\x1b[0m\n"
+                             "Power in:   \x1b[1;36m" << powerIn      << " W"   "\x1b[0m\n"
+                             "Power out:  \x1b[1;36m" << powerOut     << " W\x1b[0m, \x1b[1;36m" << powerOut / 745.69987158227022L << " HP\x1b[0m\n"
+                             "Efficiency: \x1b[1;36m" << efficiency   << "%"    "\x1b[0m\n";
             }
         } maxPower(inputs, findMax(inputs, ValToFind::Power)), maxEfficiency(inputs, findMax(inputs, ValToFind::Efficiency));
 
