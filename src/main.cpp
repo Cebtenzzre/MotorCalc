@@ -80,6 +80,8 @@
     In the end, mech watts per $, in both efficient and max power modes (checking all between brute-force?), with or without a DC converter, at different levels of max battery life.
 */
 
+using FloatType = long double;
+
 // TODO: Support different input variables; e.g. no-load RPM instead of Kv, or specs without no load RPM but with max output power, or
 //       specs with torque at stall and max efficiency but no resistance
 // TODO: Lipo cell count to voltage -- some sites specify that
@@ -94,8 +96,10 @@ do {                                               \
     if((result = pause()) < 0)                     \
         return errno == 0 ? EXIT_FAILURE : -errno; \
     else if(result == 1)                           \
-        goto restart;                              \
+        /*goto restart;*/                          \
 } while(false)
+
+// TODO: How to restart?  Longjump?  exec?  goto?  Combine strategies?  Look for security, reliability, and performance here.
 
 static void clearCin()
 {
@@ -109,9 +113,9 @@ T requestInput(std::string const &what)
     std::size_t printedLines = 0;
 
     if(!std::is_same<T, bool>())
-        std::cout << std::defaultfloat << std::setprecision(std::numeric_limits<long double>::digits10);
+        std::cout << std::defaultfloat << std::setprecision(std::numeric_limits<FloatType>::digits10);
 
-    auto displayResult = [&printedLines, &what] (auto const value)
+    auto displayResult = [&printedLines, &what](auto value)
     {
         std::cout << "\x1b[" << printedLines << "A\x1b[J"; // Move up printedLines lines and clear down
         printedLines = 0;
@@ -121,6 +125,7 @@ T requestInput(std::string const &what)
 
         std::cout << newWhat << ": ";
 
+        // XXX: Cast to base type of insertion possible?
         if(std::is_same<std::decay_t<decltype(value)>, bool>())
             std::cout << (value ? "✓" : "X");
         else
@@ -191,97 +196,64 @@ T requestInput(std::string const &what)
 template <typename T, bool NoZero = false>
 bool confirmAndRequestInput(T &var, std::string const name)
 {
-    return requestInput<bool>(std::string("Do you know ") + name + "?") ? (var = requestInput<std::decay_t<T>, NoZero>(name), true)
-                                                                        : false;
+    return requestInput<bool>("Do you know "s + name + "?") ?
+        (var = requestInput<std::decay_t<T>, NoZero>(name), true)
+      : false;
 }
 
-struct Inputs
+struct ValueSet
 {
-    long double const kv            = requestInput<long double, true>("\x1b[1m" "Kv"                       "\x1b[0m");
-    long double const voltage       = []()
+    // ---------- Inputs ----------
+    // kv = 1352.l / kt OR (rpm@V) / (V - (I@rpm - armatureR/1000))
+    FloatType const kv            = requestInput<FloatType, true>("\x1b[1m" "Kv"                       "\x1b[0m");
+    // kt = Q@rpm / ((I@rpm-I@idle)*.007...) where Q =/= 0
+    auto        const kt            = 1352.l / kv * .00706155181422604375l;
+    FloatType const voltage       = []()
     {
-        long double input;
-        if(confirmAndRequestInput<long double, true>(input, "\x1b[1m" "voltage (V)" "\x1b[0m"))
+        FloatType input;
+        if(confirmAndRequestInput<FloatType, true>(input, "\x1b[1m" "voltage (V)" "\x1b[0m"))
             return input;
-        if(confirmAndRequestInput<long double, true>(input, "\x1b[1m" "equiv. # of LiPo cells" "\x1b[0m"))
-            return input * 3.7L; // 3.7 volt nominal LiPo voltage
-        // TODO: Set custom parenthesized "(x.xx volts)"?
+        if(confirmAndRequestInput<FloatType, true>(input, "\x1b[1m" "equiv. # of LiPo cells" "\x1b[0m"))
+            return input * 3.7l; // 3.7 volt nominal LiPo voltage
+        // TODO: Set custom parenthesized equivalent as part of `requestInput`, e.g. "(x.xx volts)" here?
 
         std::cout << "Uh-oh, you don't have enough info, or this calculator sucks!\n\n\n";
         pause();
         std::exit(EXIT_FAILURE); // TODO: Restart choice should actually work here
     }();
-    long double const noLoadCurrent = requestInput<long double>      ("\x1b[1m" "unloaded current (A)"     "\x1b[0m");
-    long double       maxCurrent    = requestInput<long double, true>("\x1b[1m" "maximum current (A)"      "\x1b[0m");
-    long double const armatureR     = requestInput<long double>      ("\x1b[1m" "armature resistance (mΩ)" "\x1b[0m");
+    // I@idle = I@Q - Q / (kt*.007...)
+    FloatType const noLoadCurrent = requestInput<FloatType>      ("\x1b[1m" "unloaded current (A)"     "\x1b[0m");
+    // maxCurrent is (should be) optional
+    FloatType       maxCurrent    = requestInput<FloatType, true>("\x1b[1m" "maximum current (A)"      "\x1b[0m");
+    // armatureR = 1000 * ((V - rpm/kv) / I@rpm)
+    FloatType const armatureR     = requestInput<FloatType>      ("\x1b[1m" "armature resistance (mΩ)" "\x1b[0m");
+
+    // TODO: Advanced calculation of missing values
+    // TODO: (Global) Graph it!
+
+    auto motorPower(FloatType torque) // torque in Nm (for now?) // Q@Pout = (60 * Pout) / (2 * pi * rpm) ; Q@I = kt * (I - I@idle) * .007...
+    {
+        auto current = torque / kt + noLoadCurrent; // I@rpm = (1000 * (V - rpm/kv)) / armatureR
+        auto rpm     = kv * (voltage - (current * armatureR / 1000.l)); // Voltage drop from resistance accounted for
+        return torque * rpm * LD_PI / 30.l; // (XXX: @LanguageIssue) 2 * pi / 60 -> pi / 30
+    }
 };
 
-enum class ValToFind: uint8_t
-{
-    Power,
-    Efficiency
-};
+enum class ValToFind: uint8_t { Power, Efficiency };
 
 #define GLUE_(x, y) x##y
-#define GLUE(x, y) GLUE_(x, y)
-#define LD_PI GLUE(M_PI, L)
+#define GLUE( x, y) GLUE_(x,    y)
+#define LD_PI       GLUE( M_PI, L)
 
 // TODO: Remove code duplication.
-[[gnu::pure]] static long double findMax(Inputs const &inputs, ValToFind const val)
+[[gnu::pure]] static FloatType findMax(Inputs const &values, ValToFind val)
 {
-    auto const kt = 1352.L / inputs.kv;
-
-    long double const hardMinCurrent = inputs.noLoadCurrent + .0001L; // To avoid zero/very low torque
-    long double minCurrent = hardMinCurrent;
-    long double maxCurrent = inputs.maxCurrent;
-    long double step = (inputs.maxCurrent - hardMinCurrent) / 10L;
-    long double best = 0.L, bestCurrent = hardMinCurrent; // Highest value and the current at which it is reached
-
-    do {
-        bool update = false;
-
-        for(long double current = minCurrent; current <= maxCurrent;
-            ((current += step) > maxCurrent && (current - step) < maxCurrent /* Don't run forever with current at max */) ?
-            current = maxCurrent : 0)
-        {
-            long double const rpm = (inputs.voltage - current * inputs.armatureR / 1000.L) * inputs.kv;
-            long double const q   = kt * (current - inputs.noLoadCurrent) * .00706L; // Q in in ozf-in converted to Nm
-
-            long double const powerOut   = q * rpm * LD_PI / 30.L; // 2 * pi / 60 = pi / 30
-
-            if(val == ValToFind::Power)
-            {
-                if(powerOut > best)
-                {
-                    update      = true;
-                    best        = powerOut;
-                    bestCurrent = current;
-                }
-            } else {
-                long double const powerIn    = inputs.voltage * current;
-                long double const efficiency = (powerOut / powerIn) * 100.L;
-
-                if(efficiency > best)
-                {
-                    update      = true;
-                    best        = efficiency;
-                    bestCurrent = current;
-                }
-            }
-        }
-
-        if(!update) // No changes, we have hit a maximum or something screwy happened with small/big numbers
-            break;
-
-        // Range of bestCurrent +/- step, limited between hardMinCurrent and inputs.maxCurrent
-        minCurrent = std::max(bestCurrent - step, hardMinCurrent);
-        maxCurrent = std::min(bestCurrent + step, inputs.maxCurrent);
-
-        step /= 10;
-    } while(zutil::oneOf(maxCurrent - bestCurrent, bestCurrent - minCurrent) >= .0001L); // Accurate to 4 decimal places, or +/- .0001
-
-    return bestCurrent;
+    // Calculus FTW!
+    return val == ValToFind::Power ?      (values.noLoadCurrent + (1000.l * values.voltage / values.armatureR)) / 2.l
+                                   : sqrtl(values.noLoadCurrent * (1000.l * values.voltage / values.armatureR));
 }
+
+#define RET_ON_ERR(...) ({ auto res = __VA_ARGS__; if(res < 0) return res; })
 
 // TODO: Real error message upon failure of pause()
 int pause()
@@ -289,33 +261,27 @@ int pause()
     std::cout << "Press [Esc] to quit or [Enter] to restart... \n";
 
     struct termios oldt;
-    tcgetattr(STDIN_FILENO, &oldt); // XXX: @Robustness Warn on failure.
-
-    errno = 0;
-
-    int result;
+    RET_ON_ERR(tcgetattr(STDIN_FILENO, &oldt));
 
     {
-        struct termios newt = oldt;
-        newt.c_lflag &= ~(ICANON | ECHO);
-
-        if((result = tcsetattr(STDIN_FILENO, TCSANOW, &newt)) < 0)
-            return result;
+        struct termios newt = oldt; newt.c_lflag &= ~(ICANON | ECHO);
+        RET_ON_ERR(tcsetattr(STDIN_FILENO, TCSANOW, &newt));
     }
 
+    int  result;
     char ch = '\0';
 
     do {
         result = zutil::smartRead(STDIN_FILENO, &ch, 1);
         if(ch == zutil::oneOf('\x1b', '\n'))
         {
-            tcsetattr(STDIN_FILENO, TCSANOW, &oldt); // XXX: @Robustness Warn on failure.
+            // XXX: @LanguageIssue Candidate for "defer" or a destructor
+            RET_ON_ERR(tcsetattr(STDIN_FILENO, TCSANOW, &oldt));
             return ch == '\n';
         }
     } while(result >= 0);
 
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt); // XXX: @Robustness Warn on failure.
-
+    RET_ON_ERR(tcsetattr(STDIN_FILENO, TCSANOW, &oldt));
     return result;
 }
 
@@ -328,16 +294,15 @@ int main(int const argc, char ** const argv)
     case 2: break;
     case 1:
         std::cout << "This application is meant to be fully interactive. Starting a terminal...\n";
-        [[fallthrough]];
+    [[fallthrough]];
     case 0:
-        if(argc >= 2 && ""_sv != argv[1]) != 0)
-        {
+        if(argc >= 2 && ""_sv != argv[1]) != 0) {
             // TODO: Warn about misuse or error
         }
 
         // We are not connected to a terminal, and we were started directly.  Open a terminal.
 
-        // XXX: This opens konsole on Arch.  Try exo-open first, and put konsole last unless we're on KDE.
+        // XXX: This opens konsole on Arch.  Try exo-open first, and put konsole last unless we're on KDE.  Also try using update-alternatives.
         // XXX: Why "p"?
         char const * const termOption1[] = {"x-terminal-emulator", "--title=MotorCalc",        "-x", argv[0], "", nullptr};
         char const * const termOption2[] = {"gnome-terminal",      "-t", "MotorCalc",          "-x", argv[0], "", nullptr};
@@ -358,53 +323,45 @@ int main(int const argc, char ** const argv)
                 return -errno;
         }
 
-        return EXIT_FAILURE; // Usable terminal could not be found
-    break;
+    return EXIT_FAILURE; // Usable terminal could not be found
     default: SMART_ASSERT(false);
     }
 
-    restart:
-
     {
-        Inputs inputs; // Default constructor asks for input
+        ValueSet values; // Default constructor asks for input
 
         std::cout << std::setprecision(2) << std::fixed;
 
-        if(inputs.maxCurrent - inputs.noLoadCurrent < .01L)
+        if(values.maxCurrent - values.noLoadCurrent < .01L)
         {
             std::cout << "\n\n\x1b[31mError: Maximum current is less than or very close to unloaded current.\x1b[0m\n\n\n";
             CHECK_AND_PAUSE;
             return EXIT_SUCCESS;
         }
 
-        if((inputs.noLoadCurrent + .0001L) * inputs.armatureR / 1000.L > inputs.voltage)
+        if((values.noLoadCurrent + .0001L) * values.armatureR / 1000.l > values.voltage)
         {
             std::cout << "\n\n\x1b[31mError: At no load current or barely above, the motor would be an open circuit (Vdrop > Vin).\x1b[0m\n\n\n";
             CHECK_AND_PAUSE;
             return EXIT_SUCCESS;
         }
 
-        if(inputs.maxCurrent * inputs.armatureR / 1000.L >= inputs.voltage)
+        if(values.maxCurrent * values.armatureR / 1000.l >= values.voltage)
         {
-            inputs.maxCurrent = inputs.voltage / (inputs.armatureR / 1000.L) + .0001L;
+            values.maxCurrent = values.voltage / (values.armatureR / 1000.l) + .0001L;
             std::cout << "\n\n\x1b[1;33mWarning: At maximum current, the motor would be an open circuit (Vdrop > Vin).\n"
-                         "Maximum current has been reduced to \x1b[36m" << inputs.maxCurrent << " A\x1b[33m.\x1b[0m\n";
+                         "Maximum current has been reduced to \x1b[36m" << values.maxCurrent << " A\x1b[33m.\x1b[0m\n";
         }
 
         struct Values
         {
-            long double current, rpm, torque, powerIn, powerOut, efficiency;
+            FloatType current, rpm, torque, powerIn, powerOut, efficiency; // TODO: Get some of these values back through member functions
 
-            Values(Inputs const &inputs, long double const currentIn): current(currentIn)
+            Values(ValueSet const &values, FloatType const currentIn): current(currentIn)
             {
-                auto const kt = 1352.L / inputs.kv;
-
-                rpm    = (inputs.voltage - (current * inputs.armatureR / 1000.L /* voltage drop from resistance */)) * inputs.kv;
-                torque = kt * (current - inputs.noLoadCurrent) * .00706L; // Torque in in ozf-in converted to Nm
-
-                powerOut   = torque * rpm * LD_PI / 30.L; // 2 * pi / 60 -> pi / 30
-                powerIn    = inputs.voltage * current;
-                efficiency = powerOut * 100.L / powerIn;
+                powerOut   = values.motorPower(current);
+                powerIn    = values.voltage * current;
+                efficiency = powerOut * 100.l / powerIn;
             }
 
             void print()
@@ -417,7 +374,7 @@ int main(int const argc, char ** const argv)
                              "Power out:  \x1b[1;36m" << powerOut     << " W\x1b[0m, \x1b[1;36m" << powerOut / 745.69987158227022L << " HP\x1b[0m\n"
                              "Efficiency: \x1b[1;36m" << efficiency   << "%"    "\x1b[0m\n";
             }
-        } maxPower(inputs, findMax(inputs, ValToFind::Power)), maxEfficiency(inputs, findMax(inputs, ValToFind::Efficiency));
+        } maxPower(values, findMax(values, ValToFind::Power)), maxEfficiency(values, findMax(values, ValToFind::Efficiency));
 
         std::cout << "\n\n\x1b[1mAt maximum output power:\x1b[0m\n";
         maxPower.print();
